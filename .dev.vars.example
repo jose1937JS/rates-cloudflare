@@ -1,0 +1,9 @@
+# Comma-separated list of secret API keys (supports zero-downtime key rotation)
+API_SECRET_KEYS=dev-secret-key-1,dev-secret-key-2
+
+# Comma-separated list of allowed CORS origins
+ALLOWED_ORIGINS=http://localhost:3000,https://app.example.com
+
+# Optional native in-memory rate limiting configuration
+RATE_LIMIT_MAX=60
+RATE_LIMIT_WINDOW_MS=60000

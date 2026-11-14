@@ -1,0 +1,20 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "rates-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2024-04-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "rates-db",
+      "database_id": "<TU_DATABASE_ID>"
+    }
+  ],
+  "triggers": {
+    "crons": [
+      "0 10 * * 1-5",  // 6:00 AM hora Venezuela (UTC-4), lunes a viernes -> Scraping BCV (1 vez al día)
+      "0 */4 * * *"    // Cada 4 horas todos los días -> Consulta Yadio USDT
+    ]
+  }
+}
