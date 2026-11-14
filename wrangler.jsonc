@@ -27,6 +27,11 @@
       "enabled": false
     }
   },
+  "vars": {
+    "ALLOWED_ORIGINS": "http://localhost:3000,https://kaironshop.com",
+    "RATE_LIMIT_MAX": "10",
+    "RATE_LIMIT_WINDOW_MS": "60000"
+  },
   "triggers": {
     "crons": [
       "0 10 * * 1-5",  // 6:00 AM hora Venezuela (UTC-4), lunes a viernes -> Scraping BCV (1 vez al día)
