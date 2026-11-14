@@ -8,7 +8,7 @@
     {
       "binding": "DB",
       "database_name": "rates-db",
-      "database_id": "<TU_DATABASE_ID>"
+      "database_id": "9833f98c-b514-4236-9845-6edab29ffc40"
     }
   ],
   "triggers": {
