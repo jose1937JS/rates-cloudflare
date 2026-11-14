@@ -46,6 +46,24 @@ describe('BCV Scraper Service', () => {
     ]);
   });
 
+  it('parses rates with thousands separators like 1.010,56078251', async () => {
+    const htmlWithThousands = `
+      <div id="euro"><strong> 1.010,56078251</strong></div>
+      <div id="dolar"><strong>914,02180000</strong></div>
+    `;
+    const mockFetch = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(htmlWithThousands, {
+        status: 200,
+        headers: { 'Content-Type': 'text/html' },
+      })
+    );
+
+    const rates = await fetchBcvRates(mockFetch);
+    expect(rates).toEqual([
+      { rate: 914.02, currency: 'BCV_USD', name: 'Dólar', source: 'BCV' },
+      { rate: 1010.56, currency: 'BCV_EUR', name: 'Euro', source: 'BCV' },
+    ]);
+  });
   it('uses native HTMLRewriter when available in the Workers runtime', async () => {
     const handlers: Record<string, { text?: (chunk: { text: string }) => void }> = {};
 

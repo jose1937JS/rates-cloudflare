@@ -13,7 +13,14 @@ export class BcvScrapeError extends Error {
 }
 
 function parseSanitizedRate(raw: string, label: string): number {
-  const normalized = raw.replace(/\s+/g, '').replace(',', '.');
+  let normalized = raw.replace(/\s+/g, '');
+
+  // Formato numérico venezolano/europeo: puntos como separadores de miles y comas como decimales
+  // Ej: "1.010,56078251" -> "1010.56078251" o "914,02180000" -> "914.02180000"
+  if (normalized.includes(',')) {
+    normalized = normalized.replace(/\./g, '').replace(',', '.');
+  }
+
   if (!/^\d+(\.\d+)?$/.test(normalized)) {
     throw new BcvScrapeError(`Invalid ${label} rate format: "${raw.trim()}"`);
   }

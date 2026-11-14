@@ -1,4 +1,6 @@
 # Comma-separated list of secret API keys (supports zero-downtime key rotation)
+# Se debe generar um API key manualmente por cada app que use los endpoints y guardarse en las variables de entorno de cloudflare
+# openssl rand -hex 32 
 API_SECRET_KEYS=dev-secret-key-1,dev-secret-key-2
 
 # Comma-separated list of allowed CORS origins
