@@ -11,6 +11,22 @@
       "database_id": "9833f98c-b514-4236-9845-6edab29ffc40"
     }
   ],
+  "observability": {
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "invocation_logs": true,
+      "persist": true
+    },
+    "traces": {
+      "enabled": false,
+      "head_sampling_rate": 1,
+      "persist": true
+    },
+    "issue_detection": {
+      "enabled": false
+    }
+  },
   "triggers": {
     "crons": [
       "0 10 * * 1-5",  // 6:00 AM hora Venezuela (UTC-4), lunes a viernes -> Scraping BCV (1 vez al día)
