@@ -143,59 +143,151 @@ describe('BCV Scraper Service', () => {
 });
 
 describe('Yadio API Service', () => {
-  it('parses and normalizes Yadio rate response', async () => {
-    const mockFetch = vi.fn<typeof fetch>().mockResolvedValue(
-      new Response(JSON.stringify({ rate: 56.7891 }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      })
-    );
+  const getRequestUrl = (input: Parameters<typeof fetch>[0]): string =>
+    typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+
+  it('parses and normalizes Yadio base rate plus Binance P2P buy/sell medians', async () => {
+    const mockFetch = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const url = getRequestUrl(input);
+      if (url.includes('/rate/ves/usd')) {
+        return new Response(JSON.stringify({ rate: 56.7891 }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url.includes('side=buy')) {
+        return new Response(
+          JSON.stringify({
+            ads: [
+              { price: 40.0, ad_url: 'https://remitano.com/ve/offers/1' },
+              { price: 57.1, ad_url: 'https://c2c.binance.com/en/adv?code=1' },
+              { price: 58.0, binance_native_v1: { adv: {} } },
+              { price: 57.5, ad_url: 'https://c2c.binance.com/en/adv?code=2' },
+            ],
+          }),
+          { status: 200 }
+        );
+      }
+      if (url.includes('side=sell')) {
+        return new Response(
+          JSON.stringify({
+            ads: [
+              { price: 56.0, ad_url: 'https://c2c.binance.com/en/adv?code=3' },
+              { price: 56.2, ad_url: 'https://c2c.binance.com/en/adv?code=4' },
+              { price: 56.4, binance_native_v1: { adv: {} } },
+              { price: 57.0, ad_url: 'https://c2c.binance.com/en/adv?code=5' },
+              { price: 99.0, ad_url: 'https://www.okx.com/p2p/1' },
+            ],
+          }),
+          { status: 200 }
+        );
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
 
     const result = await fetchYadioRate(mockFetch, 0);
 
-    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(mockFetch).toHaveBeenCalledTimes(3);
     expect(result).toEqual({
       rate: 56.79,
+      buy_rate: 57.5,
+      sell_rate: 56.3,
       currency: 'YD_USD',
       name: 'USDT',
       source: 'YADIO',
     });
   });
 
-  it('retries once on network failure or 5xx and succeeds on retry', async () => {
-    const mockFetch = vi
-      .fn<typeof fetch>()
-      .mockRejectedValueOnce(new Error('ECONNRESET'))
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ data: { rate: 58.124 } }), { status: 200 })
-      );
+  it('degrades gracefully with null buy_rate/sell_rate when P2P ads fail or have no Binance offers', async () => {
+    const mockFetch = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const url = getRequestUrl(input);
+      if (url.includes('/rate/ves/usd')) {
+        return new Response(JSON.stringify({ rate: 56.79 }), { status: 200 });
+      }
+      if (url.includes('side=buy')) {
+        return new Response('Upstream error', { status: 503 });
+      }
+      if (url.includes('side=sell')) {
+        return new Response(
+          JSON.stringify({
+            ads: [{ price: 55.0, ad_url: 'https://remitano.com/ve/offers/2' }],
+          }),
+          { status: 200 }
+        );
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
 
     const result = await fetchYadioRate(mockFetch, 0);
 
-    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(result).toEqual({
+      rate: 56.79,
+      buy_rate: null,
+      sell_rate: null,
+      currency: 'YD_USD',
+      name: 'USDT',
+      source: 'YADIO',
+    });
+  });
+
+  it('retries once on network failure or 5xx for base rate and succeeds on retry', async () => {
+    let baseAttempts = 0;
+    const mockFetch = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const url = getRequestUrl(input);
+      if (url.includes('/rate/ves/usd')) {
+        baseAttempts += 1;
+        if (baseAttempts === 1) {
+          throw new Error('ECONNRESET');
+        }
+        return new Response(JSON.stringify({ data: { rate: 58.124 } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ ads: [] }), { status: 200 });
+    });
+
+    const result = await fetchYadioRate(mockFetch, 0);
+
+    expect(baseAttempts).toBe(2);
     expect(result.rate).toBe(58.12);
   });
 
-  it('throws YadioServiceError after retry is exhausted', async () => {
-    const mockFetch = vi
-      .fn<typeof fetch>()
-      .mockResolvedValueOnce(new Response('Bad Gateway', { status: 502 }))
-      .mockResolvedValueOnce(new Response('Bad Gateway', { status: 502 }));
+  it('throws YadioServiceError after base rate retry is exhausted', async () => {
+    let baseAttempts = 0;
+    const mockFetch = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const url = getRequestUrl(input);
+      if (url.includes('/rate/ves/usd')) {
+        baseAttempts += 1;
+        return new Response('Bad Gateway', { status: 502 });
+      }
+      return new Response(JSON.stringify({ ads: [] }), { status: 200 });
+    });
 
     await expect(fetchYadioRate(mockFetch, 0)).rejects.toThrow(YadioServiceError);
-    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(baseAttempts).toBe(2);
   });
 
   it('does not retry on sanity check failure or 4xx response', async () => {
-    const mockFetch = vi
-      .fn<typeof fetch>()
-      .mockResolvedValue(new Response(JSON.stringify({ rate: 0.95 }), { status: 200 }));
+    let baseAttempts = 0;
+    const mockFetch = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const url = getRequestUrl(input);
+      if (url.includes('/rate/ves/usd')) {
+        baseAttempts += 1;
+        return new Response(JSON.stringify({ rate: 0.95 }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ ads: [] }), { status: 200 });
+    });
 
     await expect(fetchYadioRate(mockFetch, 0)).rejects.toThrow(YadioServiceError);
-    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(baseAttempts).toBe(1);
 
-    mockFetch.mockResolvedValueOnce(new Response('Not Found', { status: 404 }));
+    mockFetch.mockImplementation(async (input) => {
+      const url = getRequestUrl(input);
+      if (url.includes('/rate/ves/usd')) {
+        baseAttempts += 1;
+        return new Response('Not Found', { status: 404 });
+      }
+      return new Response(JSON.stringify({ ads: [] }), { status: 200 });
+    });
     await expect(fetchYadioRate(mockFetch, 0)).rejects.toThrow(YadioServiceError);
-    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(baseAttempts).toBe(2);
   });
 });

@@ -14,6 +14,8 @@ export interface Env {
 export interface RateRecord {
   id: number;
   rate: number;
+  buy_rate: number | null;
+  sell_rate: number | null;
   currency: Currency;
   name: string;
   source: RateSource;
@@ -22,6 +24,8 @@ export interface RateRecord {
 
 export interface NewRateRecord {
   rate: number;
+  buy_rate?: number | null;
+  sell_rate?: number | null;
   currency: Currency;
   name: string;
   source: RateSource;

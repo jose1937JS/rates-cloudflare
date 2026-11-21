@@ -31,8 +31,17 @@ export const ratesRepository = {
 
     const statements = records.map((record) =>
       db
-        .prepare('INSERT INTO rates (rate, currency, name, source) VALUES (?, ?, ?, ?)')
-        .bind(record.rate, record.currency, record.name, record.source)
+        .prepare(
+          'INSERT INTO rates (rate, buy_rate, sell_rate, currency, name, source) VALUES (?, ?, ?, ?, ?, ?)'
+        )
+        .bind(
+          record.rate,
+          record.buy_rate ?? null,
+          record.sell_rate ?? null,
+          record.currency,
+          record.name,
+          record.source
+        )
     );
 
     await db.batch(statements);
@@ -76,7 +85,7 @@ export const ratesRepository = {
 
     const dataResult = await db
       .prepare(
-        `SELECT id, rate, currency, name, source, created_at FROM rates ${whereClause} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
+        `SELECT id, rate, buy_rate, sell_rate, currency, name, source, created_at FROM rates ${whereClause} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
       )
       .bind(...bindings, params.limit, offset)
       .all<RateRecord>();
@@ -95,7 +104,7 @@ export const ratesRepository = {
   async findLatestByCurrency(db: D1Database, currency: Currency): Promise<RateRecord | null> {
     const row = await db
       .prepare(
-        'SELECT id, rate, currency, name, source, created_at FROM rates WHERE currency = ? ORDER BY created_at DESC, id DESC LIMIT 1'
+        'SELECT id, rate, buy_rate, sell_rate, currency, name, source, created_at FROM rates WHERE currency = ? ORDER BY created_at DESC, id DESC LIMIT 1'
       )
       .bind(currency)
       .first<RateRecord>();
@@ -110,7 +119,7 @@ export const ratesRepository = {
     for (const currency of ALL_CURRENCIES) {
       const todayRow = await db
         .prepare(
-          'SELECT id, rate, currency, name, source, created_at FROM rates WHERE currency = ? AND created_at >= ? ORDER BY created_at DESC, id DESC LIMIT 1'
+          'SELECT id, rate, buy_rate, sell_rate, currency, name, source, created_at FROM rates WHERE currency = ? AND created_at >= ? ORDER BY created_at DESC, id DESC LIMIT 1'
         )
         .bind(currency, startOfDayUtcIso)
         .first<RateRecord>();

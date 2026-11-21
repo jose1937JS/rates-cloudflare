@@ -13,6 +13,11 @@ interface SyncLogRow {
   created_at: string;
 }
 
+type SeedRateInput = Omit<RateRecord, 'id' | 'buy_rate' | 'sell_rate'> & {
+  buy_rate?: number | null;
+  sell_rate?: number | null;
+};
+
 class InMemoryD1Database {
   rates: RateRecord[] = [];
   syncLogs: SyncLogRow[] = [];
@@ -20,9 +25,14 @@ class InMemoryD1Database {
   private nextRateId = 1;
   private nextLogId = 1;
 
-  seedRates(items: Array<Omit<RateRecord, 'id'>>): void {
+  seedRates(items: SeedRateInput[]): void {
     for (const item of items) {
-      this.rates.push({ id: this.nextRateId++, ...item });
+      this.rates.push({
+        id: this.nextRateId++,
+        ...item,
+        buy_rate: item.buy_rate ?? null,
+        sell_rate: item.sell_rate ?? null,
+      });
     }
   }
 
@@ -49,10 +59,19 @@ class InMemoryD1Database {
       }
 
       if (normalizedSql.startsWith('INSERT INTO rates')) {
-        const [rate, currency, name, source] = bindings as [number, Currency, string, RateSource];
+        const [rate, buy_rate, sell_rate, currency, name, source] = bindings as [
+          number,
+          number | null,
+          number | null,
+          Currency,
+          string,
+          RateSource,
+        ];
         const row: RateRecord = {
           id: db.nextRateId++,
           rate,
+          buy_rate: buy_rate ?? null,
+          sell_rate: sell_rate ?? null,
           currency,
           name,
           source,
@@ -86,7 +105,11 @@ class InMemoryD1Database {
         return [{ total: filtered.length }];
       }
 
-      if (normalizedSql.startsWith('SELECT id, rate, currency, name, source, created_at FROM rates')) {
+      if (
+        normalizedSql.startsWith(
+          'SELECT id, rate, buy_rate, sell_rate, currency, name, source, created_at FROM rates'
+        )
+      ) {
         const hasLimitOffset = normalizedSql.includes('LIMIT ? OFFSET ?');
         const hasLimitOne = normalizedSql.includes('LIMIT 1');
 
@@ -284,6 +307,8 @@ describe('Rates API Endpoints', () => {
       },
       {
         rate: 55.25,
+        buy_rate: 55.8,
+        sell_rate: 54.9,
         currency: 'YD_USD',
         name: 'USDT',
         source: 'YADIO',
@@ -306,14 +331,20 @@ describe('Rates API Endpoints', () => {
     expect(body.rates).toHaveLength(3);
     expect(body.rates.find((r) => r.currency === 'BCV_USD')).toMatchObject({
       rate: 46.5,
+      buy_rate: null,
+      sell_rate: null,
       isFallback: true,
     });
     expect(body.rates.find((r) => r.currency === 'BCV_EUR')).toMatchObject({
       rate: 50.1,
+      buy_rate: null,
+      sell_rate: null,
       isFallback: true,
     });
     expect(body.rates.find((r) => r.currency === 'YD_USD')).toMatchObject({
       rate: 55.25,
+      buy_rate: 55.8,
+      sell_rate: 54.9,
       isFallback: false,
     });
   });
@@ -413,8 +444,32 @@ describe('Rates API Endpoints', () => {
           { status: 200 }
         );
       }
-      if (url.includes('yadio.io')) {
+      if (url.includes('yadio.io/rate/ves/usd')) {
         return new Response(JSON.stringify({ rate: 54.88 }), { status: 200 });
+      }
+      if (url.includes('yadio.io/market/ads') && url.includes('side=buy')) {
+        return new Response(
+          JSON.stringify({
+            ads: [
+              { price: 55.1, ad_url: 'https://c2c.binance.com/en/adv?code=1' },
+              { price: 55.5, ad_url: 'https://c2c.binance.com/en/adv?code=2' },
+              { price: 55.9, ad_url: 'https://c2c.binance.com/en/adv?code=3' },
+            ],
+          }),
+          { status: 200 }
+        );
+      }
+      if (url.includes('yadio.io/market/ads') && url.includes('side=sell')) {
+        return new Response(
+          JSON.stringify({
+            ads: [
+              { price: 54.2, ad_url: 'https://c2c.binance.com/en/adv?code=4' },
+              { price: 54.4, ad_url: 'https://c2c.binance.com/en/adv?code=5' },
+              { price: 54.6, ad_url: 'https://c2c.binance.com/en/adv?code=6' },
+            ],
+          }),
+          { status: 200 }
+        );
       }
       throw new Error(`Unexpected URL: ${url}`);
     });
@@ -433,6 +488,16 @@ describe('Rates API Endpoints', () => {
     expect(body.source).toBe('all');
     expect(db.batchCalls).toBe(1);
     expect(db.rates).toHaveLength(3);
+    expect(db.rates.find((r) => r.currency === 'BCV_USD')).toMatchObject({
+      rate: 46.25,
+      buy_rate: null,
+      sell_rate: null,
+    });
+    expect(db.rates.find((r) => r.currency === 'YD_USD')).toMatchObject({
+      rate: 54.88,
+      buy_rate: 55.5,
+      sell_rate: 54.4,
+    });
     expect(db.syncLogs).toHaveLength(1);
     expect(db.syncLogs[0].source).toBe('ALL');
     expect(db.syncLogs[0].status).toBe('SUCCESS');

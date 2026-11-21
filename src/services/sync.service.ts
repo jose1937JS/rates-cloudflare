@@ -34,11 +34,19 @@ export const syncService = {
 
       await ratesRepository.insertBatch(env.DB, rates);
 
+      const summary = rates
+        .map((r) =>
+          r.buy_rate != null || r.sell_rate != null
+            ? `${r.currency}=${r.rate}(buy=${r.buy_rate ?? '-'},sell=${r.sell_rate ?? '-'})`
+            : `${r.currency}=${r.rate}`
+        )
+        .join(', ');
+
       const durationMs = Date.now() - start;
       await ratesRepository.logSync(env.DB, {
         source: logSource,
         status: 'SUCCESS',
-        message: `Synced ${rates.length} rate(s): ${rates.map((r) => `${r.currency}=${r.rate}`).join(', ')}`,
+        message: `Synced ${rates.length} rate(s): ${summary}`,
         duration_ms: durationMs,
       });
 

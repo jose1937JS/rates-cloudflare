@@ -9,7 +9,7 @@ API serverless para recopilar, almacenar y servir las tasas de cambio de Venezue
 > **Autenticación:** Todos los endpoints bajo `/api/*` requieren una API Key en la cabecera `X-API-Key: <token>` o `Authorization: Bearer <token>`.
 
 ### 1. `GET /api/rates`
-Listado paginado de tasas registradas. Admite queries opcionales: `page` (default 1), `limit` (default 10), `currency` (`BCV_USD | BCV_EUR | YD_USD`) y `days` (1-365).
+Listado paginado de tasas registradas. Admite queries opcionales: `page` (default 1), `limit` (default 10), `currency` (`BCV_USD | BCV_EUR | YD_USD`) y `days` (1-365). Incluye `buy_rate` y `sell_rate` (precio de compra y venta en Binance P2P vía Yadio para `YD_USD`, o `null` para BCV/fallback).
 
 **Respuesta:**
 ```json
@@ -18,6 +18,8 @@ Listado paginado de tasas registradas. Admite queries opcionales: `page` (defaul
     {
       "id": 5,
       "rate": 1074.35,
+      "buy_rate": 1079.5,
+      "sell_rate": 1071.2,
       "currency": "YD_USD",
       "name": "USDT",
       "source": "YADIO",
@@ -26,6 +28,8 @@ Listado paginado de tasas registradas. Admite queries opcionales: `page` (defaul
     {
       "id": 4,
       "rate": 1072.51,
+      "buy_rate": 1077.8,
+      "sell_rate": 1069.9,
       "currency": "YD_USD",
       "name": "USDT",
       "source": "YADIO",
@@ -53,11 +57,24 @@ Tasas más recientes del día actual en hora de Venezuela (`America/Caracas`, UT
     {
       "id": 1,
       "rate": 914.02,
+      "buy_rate": null,
+      "sell_rate": null,
       "currency": "BCV_USD",
       "name": "Dólar",
       "source": "BCV",
       "created_at": "2026-11-14T22:29:29.843Z",
       "isFallback": true
+    },
+    {
+      "id": 5,
+      "rate": 1074.35,
+      "buy_rate": 1079.5,
+      "sell_rate": 1071.2,
+      "currency": "YD_USD",
+      "name": "USDT",
+      "source": "YADIO",
+      "created_at": "2026-11-15T04:00:07.742Z",
+      "isFallback": false
     }
   ]
 }
@@ -74,6 +91,8 @@ Tasas más recientes del día actual en hora de Venezuela (`America/Caracas`, UT
   "rate": {
     "id": 1,
     "rate": 914.02,
+    "buy_rate": null,
+    "sell_rate": null,
     "currency": "BCV_USD",
     "name": "Dólar",
     "source": "BCV",
@@ -94,6 +113,8 @@ Histórico paginado filtrado por moneda (`BCV_USD`, `BCV_EUR` o `YD_USD`). Admit
     {
       "id": 1,
       "rate": 914.02,
+      "buy_rate": null,
+      "sell_rate": null,
       "currency": "BCV_USD",
       "name": "Dólar",
       "source": "BCV",
@@ -134,6 +155,8 @@ Sincronización manual inmediata. Admite query opcional `source`: `all` (default
     },
     {
       "rate": 1071.62,
+      "buy_rate": 1076.4,
+      "sell_rate": 1068.9,
       "currency": "YD_USD",
       "name": "USDT",
       "source": "YADIO"
@@ -148,10 +171,10 @@ Sincronización manual inmediata. Admite query opcional `source`: `all` (default
 
 ### Arquitectura
 - Runtime: Cloudflare Workers + Hono + Zod (@hono/zod-validator)
-- Base de datos: Cloudflare D1 (SQLite serverless) con migraciones en migrations/0001_initial_schema.sql
+- Base de datos: Cloudflare D1 (SQLite serverless) con migraciones en migrations/0001_initial_schema.sql y migrations/0002_add_buy_sell_rates.sql
 - Cron Triggers:
   - 0 10 * * 1-5 (6:00 AM America/Caracas, lunes a viernes): Scraping BCV con HTMLRewriter nativo.
-  - 0 */4 * * * (cada 4 horas): Consulta a https://api.yadio.io/rate/ves/usd.
+  - 0 */4 * * * (cada 4 horas): Consulta a https://api.yadio.io/rate/ves/usd y anuncios Binance P2P vía https://api.yadio.io/market/ads.
 - Seguridad:
   - API Key timing-safe (SHA-256 + crypto.subtle.timingSafeEqual) vía X-API-Key o Authorization: Bearer. Soporta rotación de claves separadas por coma en API_SECRET_KEYS.
   - CORS estricto por allowlist (ALLOWED_ORIGINS).
