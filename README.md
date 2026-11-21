@@ -133,7 +133,7 @@ Histórico paginado filtrado por moneda (`BCV_USD`, `BCV_EUR` o `YD_USD`). Admit
 ---
 
 ### 5. `POST /api/sync`
-Sincronización manual inmediata. Admite query opcional `source`: `all` (default), `bcv` o `yadio`.
+Sincronización manual inmediata. Admite `source` por query (`?source=all|bcv|yadio`) o JSON body (`{ "source": "all|bcv|yadio" }`), por defecto `all`.
 
 **Respuesta (`source=all`):**
 ```json

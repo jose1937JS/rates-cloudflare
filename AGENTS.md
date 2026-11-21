@@ -58,7 +58,7 @@ observability: "Workers logs enabled (head_sampling_rate: 1, invocation_logs: tr
 │   ├── routes/
 │   │   ├── health.ts                # `healthRoutes` -> GET /health (SELECT 1 en D1)
 │   │   ├── rates.ts                 # `ratesRoutes`  -> GET /, /today, /:currency, /:currency/all
-│   │   └── sync.ts                  # `syncRoutes`   -> POST / (?source=all|bcv|yadio)
+│   │   ├── sync.ts                  # `syncRoutes`   -> POST / (?source o JSON body: all|bcv|yadio)
 │   └── services/
 │       ├── bcv.service.ts           # `fetchBcvRates`, `BcvScrapeError` (HTMLRewriter + fallback regex/depth)
 │       ├── yadio.service.ts         # `fetchYadioRate`, `YadioServiceError` (JSON + 1 retry)
@@ -95,7 +95,7 @@ Request
         ├── GET  /api/rates/today       (hoy Caracas UTC-4; fallback a último histórico con `isFallback: true`)
         ├── GET  /api/rates/:currency   (último registro o 404)
         ├── GET  /api/rates/:currency/all (histórico paginado por moneda)
-        └── POST /api/sync              (query Zod: `source=all|bcv|yadio`; 200 o 502 si falla upstream)
+        └── POST /api/sync              (query o JSON body Zod: `source=all|bcv|yadio`; 200 o 502 si falla upstream)
 ```
 
 ### 4.2. Flujo Cron Triggers (`scheduled` en `src/index.ts`)
@@ -119,11 +119,10 @@ Request
 ### 4.4. Servicios de Ingesta
 
 - **BCV (`src/services/bcv.service.ts`):**
-  - Timeout `10_000ms` (`AbortSignal.timeout`), sin reintentos.
-  - Extrae `#dolar strong` / `#dolar` y `#euro strong` / `#euro`.
-  - Si `HTMLRewriter` existe (Workers `workerd`), usa streaming `HTMLRewriter`; si es `undefined` (tests en Node), usa `extractTagContentByIdFallback` con conteo de profundidad de etiquetas HTML.
-  - Normalización (`parseSanitizedRate`): elimina espacios; si contiene `,`, elimina `.` (miles) y convierte `,` a `.` (`1.010,56078251` -> `1010.56`); redondea a 2 decimales.
-  - Sanidad: regex `/^\d+(\.\d+)?$/` y rango estricto `1 < rate < 100_000`. Lanza `BcvScrapeError`.
+  - Timeout `10_000ms` (`AbortSignal.timeout`) en primario (`https://www.bcv.org.ve/terminos-condiciones`) con respaldo automático JSON a `https://rates.dolarvzla.com/bcv/current.json` ante errores del origen (como `HTTP 526` por cadena SSL incompleta de `bcv.org.ve` en Cloudflare Workers).
+  - Primario extrae `#dolar strong` / `#dolar` y `#euro strong` / `#euro` usando `HTMLRewriter` en `workerd` o `extractTagContentByIdFallback` en Node.
+  - Normalización (`parseSanitizedRate` / `normalizeValidatedRate`): elimina espacios; si contiene `,`, elimina `.` (miles) y convierte `,` a `.` (`1.010,56078251` -> `1010.56`); redondea a 2 decimales.
+  - Sanidad: regex `/^\d+(\.\d+)?$/` y rango estricto `1 < rate < 100_000`. Lanza `BcvScrapeError` solo si fallan tanto el origen BCV como el respaldo.
 - **Yadio (`src/services/yadio.service.ts`):**
   - Ejecuta en paralelo el fetch principal (`/rate/ves/usd`, timeout `8_000ms`, soporta `{ rate }` o `{ data: { rate } }`) junto a `/market/ads?asset=USDT&currency=VES&side={buy|sell}&limit=50` (timeout `6_000ms`).
   - El fetch principal realiza 1 reintento automático tras `250ms` únicamente en errores de red/timeout o HTTP `>= 500`. NO reintenta `4xx`, JSON inválido ni fallos de sanidad (`!Number.isFinite(rate) || rate <= 1`).
@@ -153,13 +152,12 @@ Esta sección documenta limitaciones reales del código actual para facilitar de
 1. **Rate Limiter en memoria por isolate (`src/middleware/rate-limit.ts`):**
    - `rateLimitStore` es un `Map` local al isolate del Worker; no es global entre PoPs ni persiste entre reciclajes de isolate. Además, `RATE_LIMIT_MAX` en `wrangler.jsonc` está en `"10"` req/min (más estricto que el fallback `60` del código) y se aplica *antes* de `authMiddleware` (afectando también a `/health` y peticiones sin key).
    - *Mejora posible:* migrar a Cloudflare Rate Limiting Binding nativo o Durable Objects si se requiere límite global estricto, o ajustar `RATE_LIMIT_MAX` en `wrangler.jsonc`.
-2. **Atomicidad todo-o-nada en `syncService.sync(env, 'all')` (`src/services/sync.service.ts`):**
-   - `fetchBcvRates()` y `fetchYadioRate()` corren secuencialmente antes de `insertBatch`. Si BCV falla (ej. sitio del BCV caído o cambio de HTML), tampoco se guarda la tasa de Yadio en ese sync `'all'`, y viceversa.
+2. **Resiliencia parcial en `syncService.sync(env, 'all')` (`src/services/sync.service.ts`):**
+   - `fetchBcvRates()` y `fetchYadioRate()` corren en paralelo (`Promise.all`). Las fuentes exitosas se persisten vía `insertBatch` aunque la otra falle; si hubo al menos un error, se registra `ERROR` en `sync_logs` y se lanza el error (`502`).
    - Si `env.DB` falla dentro de `catch` al llamar `ratesRepository.logSync(...)`, esa excepción ocultará el error original de scraping.
 3. **Límites y formato del parser BCV (`src/services/bcv.service.ts`):**
    - Cota superior fija `parsed >= 100_000` y cota inferior `parsed <= 1`: si la tasa supera `100_000` o tras una reconversión monetaria baja de `1`, lanzará `BcvScrapeError`.
    - Si BCV devolviera un número sin coma pero con punto de miles (ej. `"1.010"`), al no cumplir `normalized.includes(',')` se interpretaría como `1.01`.
-   - El scraper de BCV no tiene retry automático (a diferencia de Yadio).
 4. **Filtro `days` vs `today` en `src/db/rates.repository.ts`:**
    - `findTodayWithFallback` alinea exactamente al inicio del día en `America/Caracas` (`UTC-4`). En cambio, `findPaginated` con `?days=N` calcula una ventana móvil `Date.now() - days * 86_400_000` en UTC, no medianoche de Caracas.
 5. **Validación Zod y errores HTTP:**

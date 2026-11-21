@@ -1,6 +1,7 @@
 import type { NewRateRecord } from '../types/env';
 
 const BCV_URL = 'https://www.bcv.org.ve/terminos-condiciones';
+const BCV_FALLBACK_URL = 'https://rates.dolarvzla.com/bcv/current.json';
 const BCV_TIMEOUT_MS = 10_000;
 const BCV_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
@@ -10,6 +11,15 @@ export class BcvScrapeError extends Error {
     super(message);
     this.name = 'BcvScrapeError';
   }
+}
+
+function normalizeValidatedRate(numericValue: number, label: string): number {
+  const parsed = Number(numericValue.toFixed(2));
+  if (!Number.isFinite(parsed) || parsed <= 1 || parsed >= 100_000) {
+    throw new BcvScrapeError(`${label} rate out of sanity bounds: ${parsed}`);
+  }
+
+  return parsed;
 }
 
 function parseSanitizedRate(raw: string, label: string): number {
@@ -25,12 +35,7 @@ function parseSanitizedRate(raw: string, label: string): number {
     throw new BcvScrapeError(`Invalid ${label} rate format: "${raw.trim()}"`);
   }
 
-  const parsed = Number(parseFloat(normalized).toFixed(2));
-  if (!Number.isFinite(parsed) || parsed <= 1 || parsed >= 100_000) {
-    throw new BcvScrapeError(`${label} rate out of sanity bounds: ${parsed}`);
-  }
-
-  return parsed;
+  return normalizeValidatedRate(parseFloat(normalized), label);
 }
 
 function extractTagContentByIdFallback(html: string, id: string): string {
@@ -112,7 +117,7 @@ async function extractBcvTexts(response: Response): Promise<{ usdRaw: string; eu
   };
 }
 
-export async function fetchBcvRates(fetcher: typeof fetch = fetch): Promise<NewRateRecord[]> {
+async function fetchBcvDirect(fetcher: typeof fetch): Promise<NewRateRecord[]> {
   let response: Response;
   try {
     response = await fetcher(BCV_URL, {
@@ -154,4 +159,81 @@ export async function fetchBcvRates(fetcher: typeof fetch = fetch): Promise<NewR
       source: 'BCV',
     },
   ];
+}
+
+async function fetchBcvFromFallback(fetcher: typeof fetch): Promise<NewRateRecord[]> {
+  let response: Response;
+  try {
+    response = await fetcher(BCV_FALLBACK_URL, {
+      headers: {
+        Accept: 'application/json',
+      },
+      signal: AbortSignal.timeout(BCV_TIMEOUT_MS),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new BcvScrapeError(`Fallback network error: ${message}`);
+  }
+
+  if (!response.ok) {
+    throw new BcvScrapeError(`Fallback responded with HTTP ${response.status}`);
+  }
+
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new BcvScrapeError('Invalid JSON from BCV fallback');
+  }
+
+  if (
+    !payload ||
+    typeof payload !== 'object' ||
+    !('current' in payload) ||
+    !payload.current ||
+    typeof payload.current !== 'object'
+  ) {
+    throw new BcvScrapeError('Missing current field in BCV fallback response');
+  }
+
+  const current = payload.current as { usd?: unknown; eur?: unknown };
+  const usdNumeric = Number(current.usd);
+  const eurNumeric = Number(current.eur);
+
+  if (!Number.isFinite(usdNumeric) || !Number.isFinite(eurNumeric)) {
+    throw new BcvScrapeError('Missing numeric usd/eur fields in BCV fallback response');
+  }
+
+  return [
+    {
+      rate: normalizeValidatedRate(usdNumeric, 'BCV_USD'),
+      currency: 'BCV_USD',
+      name: 'Dólar',
+      source: 'BCV',
+    },
+    {
+      rate: normalizeValidatedRate(eurNumeric, 'BCV_EUR'),
+      currency: 'BCV_EUR',
+      name: 'Euro',
+      source: 'BCV',
+    },
+  ];
+}
+
+export async function fetchBcvRates(fetcher: typeof fetch = fetch): Promise<NewRateRecord[]> {
+  try {
+    return await fetchBcvDirect(fetcher);
+  } catch (directError) {
+    try {
+      // BCV suele presentar cadenas SSL incompletas (HTTP 526 en Cloudflare) o bloqueos por IP;
+      // usamos el CDN espejo oficial de DolarVZLA como respaldo automático.
+      return await fetchBcvFromFallback(fetcher);
+    } catch (fallbackError) {
+      const directMessage =
+        directError instanceof Error ? directError.message : String(directError);
+      const fallbackMessage =
+        fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+      throw new BcvScrapeError(`${directMessage} | ${fallbackMessage}`);
+    }
+  }
 }

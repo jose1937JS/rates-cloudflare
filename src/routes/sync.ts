@@ -7,7 +7,31 @@ import type { Env } from '../types/env';
 export const syncRoutes = new Hono<{ Bindings: Env }>();
 
 syncRoutes.post('/', zValidator('query', syncQuerySchema), async (c) => {
-  const { source } = c.req.valid('query');
+  let { source } = c.req.valid('query');
+
+  if (!c.req.query('source')) {
+    const contentType = c.req.header('Content-Type') ?? '';
+    if (contentType.toLowerCase().includes('application/json')) {
+      const rawBody = await c.req.text();
+      if (rawBody.trim().length > 0) {
+        let parsedJson: unknown;
+        try {
+          parsedJson = JSON.parse(rawBody);
+        } catch {
+          return c.json({ error: 'Invalid JSON body' }, 400);
+        }
+
+        const validated = syncQuerySchema.safeParse(parsedJson);
+        if (!validated.success) {
+          return c.json(
+            { error: 'Invalid source parameter', details: validated.error.flatten() },
+            400
+          );
+        }
+        source = validated.data.source;
+      }
+    }
+  }
 
   try {
     const result = await syncService.sync(c.env, source);

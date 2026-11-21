@@ -21,18 +21,52 @@ export const syncService = {
 
     try {
       const rates: NewRateRecord[] = [];
+      const errors: string[] = [];
 
-      if (source === 'bcv' || source === 'all') {
-        const bcvRates = await fetchBcvRates();
-        rates.push(...bcvRates);
+      const [bcvResult, yadioResult] = await Promise.all([
+        source === 'bcv' || source === 'all'
+          ? fetchBcvRates().then(
+              (value) => ({ ok: true as const, value }),
+              (err) => ({
+                ok: false as const,
+                error: err instanceof Error ? err.message : String(err),
+              })
+            )
+          : Promise.resolve(null),
+        source === 'yadio' || source === 'all'
+          ? fetchYadioRate().then(
+              (value) => ({ ok: true as const, value }),
+              (err) => ({
+                ok: false as const,
+                error: err instanceof Error ? err.message : String(err),
+              })
+            )
+          : Promise.resolve(null),
+      ]);
+
+      if (bcvResult) {
+        if (bcvResult.ok) {
+          rates.push(...bcvResult.value);
+        } else {
+          errors.push(bcvResult.error);
+        }
       }
 
-      if (source === 'yadio' || source === 'all') {
-        const yadioRate = await fetchYadioRate();
-        rates.push(yadioRate);
+      if (yadioResult) {
+        if (yadioResult.ok) {
+          rates.push(yadioResult.value);
+        } else {
+          errors.push(yadioResult.error);
+        }
       }
 
-      await ratesRepository.insertBatch(env.DB, rates);
+      if (rates.length > 0) {
+        await ratesRepository.insertBatch(env.DB, rates);
+      }
+
+      if (errors.length > 0) {
+        throw new Error(errors.join(' | '));
+      }
 
       const summary = rates
         .map((r) =>

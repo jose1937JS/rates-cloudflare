@@ -519,4 +519,67 @@ describe('Rates API Endpoints', () => {
     expect(db.syncLogs[0].source).toBe('YADIO');
     expect(db.syncLogs[0].status).toBe('ERROR');
   });
+
+  it('POST /api/sync accepts JSON body { source } and falls back BCV on HTTP 526', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('bcv.org.ve')) {
+        return new Response('Invalid SSL Certificate', { status: 526 });
+      }
+      if (url.includes('rates.dolarvzla.com/bcv/current.json')) {
+        return new Response(
+          JSON.stringify({ current: { date: '2026-11-23', usd: 919.8227, eur: 1011.17949056 } }),
+          { status: 200 }
+        );
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+
+    const res = await app.fetch(
+      new Request('https://api.example.com/api/sync', {
+        method: 'POST',
+        headers: { 'X-API-Key': API_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: 'bcv' }),
+      }),
+      env
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { source: string; syncedCount: number };
+    expect(body.source).toBe('bcv');
+    expect(body.syncedCount).toBe(2);
+    expect(db.rates.map((r) => ({ currency: r.currency, rate: r.rate }))).toEqual([
+      { currency: 'BCV_USD', rate: 919.82 },
+      { currency: 'BCV_EUR', rate: 1011.18 },
+    ]);
+  });
+
+  it('POST /api/sync?source=all still persists Yadio rates if both BCV direct and fallback fail', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('bcv.org.ve') || url.includes('rates.dolarvzla.com')) {
+        return new Response('SSL Error', { status: 526 });
+      }
+      if (url.includes('yadio.io/rate/ves/usd')) {
+        return new Response(JSON.stringify({ rate: 54.88 }), { status: 200 });
+      }
+      if (url.includes('yadio.io/market/ads')) {
+        return new Response(JSON.stringify({ ads: [] }), { status: 200 });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+
+    const res = await app.fetch(
+      new Request('https://api.example.com/api/sync?source=all', {
+        method: 'POST',
+        headers: { 'X-API-Key': API_KEY },
+      }),
+      env
+    );
+
+    expect(res.status).toBe(502);
+    expect(db.rates).toHaveLength(1);
+    expect(db.rates[0].currency).toBe('YD_USD');
+    expect(db.syncLogs[0].status).toBe('ERROR');
+  });
 });

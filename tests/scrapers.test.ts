@@ -100,7 +100,40 @@ describe('BCV Scraper Service', () => {
     }
   });
 
-  it('throws BcvScrapeError when BCV returns non-OK HTTP status', async () => {
+  it('falls back to rates.dolarvzla.com when BCV direct fails with HTTP 526', async () => {
+    const getRequestUrl = (input: Parameters<typeof fetch>[0]): string =>
+      typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+
+    const mockFetch = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const url = getRequestUrl(input);
+      if (url.includes('bcv.org.ve')) {
+        return new Response('Invalid SSL Certificate', { status: 526 });
+      }
+      if (url.includes('rates.dolarvzla.com/bcv/current.json')) {
+        return new Response(
+          JSON.stringify({
+            current: {
+              date: '2026-11-23',
+              usd: 919.8227,
+              eur: 1011.17949056,
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+
+    const rates = await fetchBcvRates(mockFetch);
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(rates).toEqual([
+      { rate: 919.82, currency: 'BCV_USD', name: 'Dólar', source: 'BCV' },
+      { rate: 1011.18, currency: 'BCV_EUR', name: 'Euro', source: 'BCV' },
+    ]);
+  });
+
+  it('throws BcvScrapeError when BCV returns non-OK HTTP status and fallback fails', async () => {
     const mockFetch = vi
       .fn<typeof fetch>()
       .mockResolvedValue(new Response('Service Unavailable', { status: 503 }));
