@@ -76,13 +76,88 @@ Tasas más recientes del día actual en hora de Venezuela (`America/Caracas`, UT
       "created_at": "2026-11-15T04:00:07.742Z",
       "isFallback": false
     }
+  ],
+  "usdt_p2p_tiers": {
+    "currency": "YD_USD",
+    "source": "YADIO_BINANCE_P2P",
+    "min_usdt": 5,
+    "min_ves": 5371.75,
+    "base_rate": 1074.35,
+    "updated_at": "2026-11-15T04:00:07.742Z",
+    "tiers": [
+      {
+        "tier_key": "tier_5",
+        "label": "Mínimo (5 USDT)",
+        "bucket": "small",
+        "ref_usdt": 5,
+        "amount_ves": 5371.75,
+        "buy_rate": 1082.4,
+        "sell_rate": 1068.1,
+        "avg_rate": 1075.25,
+        "sample_count_buy": 12,
+        "sample_count_sell": 10,
+        "is_fallback": false
+      }
+    ]
+  }
+}
+```
+
+---
+
+### 3. `GET /api/rates/usdt/tiers`
+Curva de tramos vigentes de USDT Binance P2P por monto en VES almacenados en D1 (ideal para caché offline en aplicaciones móviles). Si la tabla de tramos aún está vacía tras migrar, hace fallback al último `YD_USD` registrado.
+
+**Respuesta:**
+```json
+{
+  "currency": "YD_USD",
+  "source": "YADIO_BINANCE_P2P",
+  "min_usdt": 5,
+  "min_ves": 5371.75,
+  "base_rate": 1074.35,
+  "updated_at": "2026-11-15T04:00:07.742Z",
+  "tiers": [
+    {
+      "tier_key": "tier_5",
+      "label": "Mínimo (5 USDT)",
+      "bucket": "small",
+      "ref_usdt": 5,
+      "amount_ves": 5371.75,
+      "buy_rate": 1082.4,
+      "sell_rate": 1068.1,
+      "avg_rate": 1075.25,
+      "sample_count_buy": 12,
+      "sample_count_sell": 10,
+      "is_fallback": false
+    }
   ]
 }
 ```
 
 ---
 
-### 3. `GET /api/rates/:currency`
+### 4. `GET /api/rates/usdt/by-amount?ves=<number>`
+Resuelve server-side sobre D1 las tasas de compra, venta y promedio de USDT Binance P2P para un monto específico en bolívares (`ves > 0`). Montos menores o iguales al piso de 5 USDT usan `tier_5` (`clamped_min`); montos por encima del tramo grande usan `unfiltered` (`unfiltered_max`).
+
+**Respuesta:**
+```json
+{
+  "requested_ves": 35000,
+  "matched_tier_key": "tier_35",
+  "bucket": "small",
+  "match_type": "nearest_tier",
+  "buy_rate": 1079.5,
+  "sell_rate": 1071.2,
+  "avg_rate": 1075.35,
+  "min_ves": 5371.75,
+  "updated_at": "2026-11-15T04:00:07.742Z"
+}
+```
+
+---
+
+### 5. `GET /api/rates/:currency`
 Último valor registrado para la moneda especificada (`BCV_USD`, `BCV_EUR` o `YD_USD`).
 
 **Respuesta:**
@@ -103,7 +178,7 @@ Tasas más recientes del día actual en hora de Venezuela (`America/Caracas`, UT
 
 ---
 
-### 4. `GET /api/rates/:currency/all`
+### 6. `GET /api/rates/:currency/all`
 Histórico paginado filtrado por moneda (`BCV_USD`, `BCV_EUR` o `YD_USD`). Admite `page`, `limit` y `days`.
 
 **Respuesta:**
@@ -132,7 +207,7 @@ Histórico paginado filtrado por moneda (`BCV_USD`, `BCV_EUR` o `YD_USD`). Admit
 
 ---
 
-### 5. `POST /api/sync`
+### 7. `POST /api/sync`
 Sincronización manual inmediata. Admite `source` por query (`?source=all|bcv|yadio`) o JSON body (`{ "source": "all|bcv|yadio" }`), por defecto `all`.
 
 **Respuesta (`source=all`):**
@@ -162,7 +237,8 @@ Sincronización manual inmediata. Admite `source` por query (`?source=all|bcv|ya
       "source": "YADIO"
     }
   ],
-  "durationMs": 536
+  "durationMs": 536,
+  "p2pTiersCount": 7
 }
 ```
 
@@ -171,7 +247,7 @@ Sincronización manual inmediata. Admite `source` por query (`?source=all|bcv|ya
 
 ### Arquitectura
 - Runtime: Cloudflare Workers + Hono + Zod (@hono/zod-validator)
-- Base de datos: Cloudflare D1 (SQLite serverless) con migraciones en migrations/0001_initial_schema.sql y migrations/0002_add_buy_sell_rates.sql
+- Base de datos: Cloudflare D1 (SQLite serverless) con migraciones en migrations/0001_initial_schema.sql, migrations/0002_add_buy_sell_rates.sql y migrations/0003_add_usdt_p2p_tiers.sql
 - Cron Triggers:
   - 0 10 * * 1-5 (6:00 AM America/Caracas, lunes a viernes): Scraping BCV con HTMLRewriter nativo.
   - 0 */4 * * * (cada 4 horas): Consulta a https://api.yadio.io/rate/ves/usd y anuncios Binance P2P vía https://api.yadio.io/market/ads.

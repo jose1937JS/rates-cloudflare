@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { BcvScrapeError, fetchBcvRates } from '../src/services/bcv.service';
-import { fetchYadioRate, YadioServiceError } from '../src/services/yadio.service';
+import {
+  buildUsdtP2PTiers,
+  extractAdVesLimits,
+  fetchYadioRate,
+  YadioServiceError,
+} from '../src/services/yadio.service';
 
 const VALID_BCV_HTML = `
 <!DOCTYPE html>
@@ -221,7 +226,7 @@ describe('Yadio API Service', () => {
     const result = await fetchYadioRate(mockFetch, 0);
 
     expect(mockFetch).toHaveBeenCalledTimes(3);
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       rate: 56.79,
       buy_rate: 57.5,
       sell_rate: 56.3,
@@ -229,6 +234,124 @@ describe('Yadio API Service', () => {
       name: 'USDT',
       source: 'YADIO',
     });
+    expect(result.p2pTiers).toHaveLength(7);
+    expect(result.p2pTiers.find((t) => t.tier_key === 'unfiltered')).toMatchObject({
+      buy_rate: 57.5,
+      sell_rate: 56.3,
+      avg_rate: 56.9,
+      is_fallback: 0,
+    });
+  });
+
+  it('extracts VES limits defensively across Yadio and binance_native_v1 schemas', () => {
+    expect(
+      extractAdVesLimits({
+        min_amount: 5000,
+        max_amount: 100000,
+        dynamic_max_amount: 45000,
+      })
+    ).toEqual({ minVes: 5000, maxVes: 45000 });
+
+    expect(
+      extractAdVesLimits({
+        binance_native_v1: {
+          adv: {
+            minSingleTransAmount: '10000',
+            dynamicMaxSingleTransAmount: '80000',
+            maxSingleTransAmount: '200000',
+          },
+        },
+      })
+    ).toEqual({ minVes: 10000, maxVes: 80000 });
+
+    expect(extractAdVesLimits({ min_amount: 50000, max_amount: 10000 })).toBeNull();
+    expect(extractAdVesLimits({})).toBeNull();
+  });
+
+  it('computes Binance P2P liquidity tiers by VES amount, excludes outliers, and falls back upward', async () => {
+    const mockFetch = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const url = getRequestUrl(input);
+      if (url.includes('/rate/ves/usd')) {
+        return new Response(JSON.stringify({ rate: 1000 }), { status: 200 });
+      }
+      if (url.includes('side=buy')) {
+        return new Response(
+          JSON.stringify({
+            ads: [
+              // Non-Binance & extreme outlier (>40% from baseRate) must be ignored
+              { price: 500, min_amount: 1000, max_amount: 500000, ad_url: 'https://remitano.com/1' },
+              { price: 1800, min_amount: 1000, max_amount: 500000, ad_url: 'https://c2c.binance.com/en/adv?code=trap' },
+              // Small-to-medium Binance buy ads (5,000 - 80,000 VES) -> covers tier_15 (15k), tier_35 (35k), tier_75 (75k)
+              // Note: no ad starts <= 5,000 (tier_5 = 5,000 VES), so tier_5 should fall back upward to tier_15!
+              { price: 1040, min_amount: 10000, dynamic_max_amount: 80000, ad_url: 'https://c2c.binance.com/en/adv?code=b1' },
+              { price: 1044, min_amount: 12000, dynamic_max_amount: 100000, ad_url: 'https://c2c.binance.com/en/adv?code=b2' },
+              // Large Binance buy ads (100,000 - 600,000 VES) -> covers tier_150 (150k), tier_400 (400k)
+              { price: 1010, min_amount: 100000, dynamic_max_amount: 600000, ad_url: 'https://c2c.binance.com/en/adv?code=b3' },
+              { price: 1014, min_amount: 100000, dynamic_max_amount: 600000, ad_url: 'https://c2c.binance.com/en/adv?code=b4' },
+            ],
+          }),
+          { status: 200 }
+        );
+      }
+      if (url.includes('side=sell')) {
+        return new Response(
+          JSON.stringify({
+            ads: [
+              { price: 1600, min_amount: 1000, max_amount: 500000, ad_url: 'https://www.okx.com/p2p/1' },
+              { price: 980, min_amount: 4000, dynamic_max_amount: 80000, ad_url: 'https://c2c.binance.com/en/adv?code=s1' },
+              { price: 984, min_amount: 4000, dynamic_max_amount: 80000, ad_url: 'https://c2c.binance.com/en/adv?code=s2' },
+              { price: 1002, min_amount: 100000, dynamic_max_amount: 600000, ad_url: 'https://c2c.binance.com/en/adv?code=s3' },
+              { price: 1006, min_amount: 100000, dynamic_max_amount: 600000, ad_url: 'https://c2c.binance.com/en/adv?code=s4' },
+            ],
+          }),
+          { status: 200 }
+        );
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+
+    const result = await fetchYadioRate(mockFetch, 0);
+    const tier5 = result.p2pTiers.find((t) => t.tier_key === 'tier_5');
+    const tier15 = result.p2pTiers.find((t) => t.tier_key === 'tier_15');
+    const tier400 = result.p2pTiers.find((t) => t.tier_key === 'tier_400');
+    const unfiltered = result.p2pTiers.find((t) => t.tier_key === 'unfiltered');
+
+    expect(tier5).toMatchObject({
+      amount_ves: 5000,
+      buy_rate: 1042, // upward fallback from tier_15
+      sell_rate: 982, // real match on sell side
+      sample_count_buy: 0,
+      sample_count_sell: 2,
+      is_fallback: 1,
+    });
+    expect(tier15).toMatchObject({
+      amount_ves: 15000,
+      buy_rate: 1042,
+      sell_rate: 982,
+      avg_rate: 1012,
+      sample_count_buy: 2,
+      sample_count_sell: 2,
+      is_fallback: 0,
+    });
+    expect(tier400).toMatchObject({
+      amount_ves: 400000,
+      buy_rate: 1012,
+      sell_rate: 1004,
+      avg_rate: 1008,
+      sample_count_buy: 2,
+      sample_count_sell: 2,
+      is_fallback: 0,
+    });
+    expect(unfiltered).toMatchObject({
+      amount_ves: null,
+      buy_rate: 1027,
+      sell_rate: 993,
+      avg_rate: 1010,
+      is_fallback: 0,
+    });
+
+    // Empty ads return empty p2pTiers cleanly
+    expect(buildUsdtP2PTiers(1000, [], [])).toEqual([]);
   });
 
   it('degrades gracefully with null buy_rate/sell_rate when P2P ads fail or have no Binance offers', async () => {
@@ -260,6 +383,7 @@ describe('Yadio API Service', () => {
       currency: 'YD_USD',
       name: 'USDT',
       source: 'YADIO',
+      p2pTiers: [],
     });
   });
 

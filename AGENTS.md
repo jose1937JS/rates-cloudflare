@@ -25,7 +25,7 @@ observability: "Workers logs enabled (head_sampling_rate: 1, invocation_logs: tr
    - Usar siempre `pnpm` (`pnpm add`, `pnpm install`). Nunca ejecutar `npm install` (arborist falla sobre `node_modules/.pnpm`).
    - No eliminar `packages: ['.']` de `pnpm-workspace.yaml` (pnpm 10+ en Cloudflare Workers Builds falla con `packages field missing or empty`).
 2. **Orden de Rutas en `src/routes/rates.ts`:**
-   - `GET /today` DEBE permanecer registrado antes de `GET /:currency`; de lo contrario `/today` entra en `/:currency` y falla validación Zod con `400`.
+   - Rutas estáticas (`GET /today`, `GET /usdt/tiers`, `GET /usdt/by-amount`) DEBEN permanecer registradas antes de `GET /:currency`; de lo contrario entran en `/:currency` y fallan validación Zod con `400`.
 3. **Consultas D1:**
    - Usar exclusivamente prepared statements (`.prepare(...).bind(...)`) y `db.batch([...])` para inserciones múltiples (`ratesRepository.insertBatch`).
 4. **Zona Horaria:**
@@ -42,14 +42,18 @@ observability: "Workers logs enabled (head_sampling_rate: 1, invocation_logs: tr
 .
 ├── migrations/
 │   ├── 0001_initial_schema.sql      # Tablas rates, sync_logs e índices DESC
-│   └── 0002_add_buy_sell_rates.sql  # Columnas opcionales buy_rate y sell_rate en rates
+│   ├── 0002_add_buy_sell_rates.sql  # Columnas opcionales buy_rate y sell_rate en rates
+│   └── 0003_add_usdt_p2p_tiers.sql  # Tabla usdt_p2p_tiers (curva de liquidez P2P por monto VES)
 ├── src/
 │   ├── index.ts                     # Hono `app`, cadena de middlewares, export `{ fetch, scheduled }`
-│   ├── types/env.ts                 # `Env`, `Currency`, `RateSource`, `SyncSource`, DTOs
+│   ├── config/
+│   │   └── usdt-tiers.ts            # `USDT_P2P_TIERS` (tier_5..tier_400 + unfiltered) y `USDT_MIN_TIER_AMOUNT`
+│   ├── types/env.ts                 # `Env`, `Currency`, `RateSource`, `SyncSource`, DTOs y tipos de tramos
 │   ├── schemas/rates.schema.ts      # `currencyEnum`, `currencyParamSchema`, `ratesQuerySchema`,
-│   │                                # `currencyHistoryQuerySchema`, `syncQuerySchema`
-│   ├── db/rates.repository.ts       # `getCaracasStartOfDayUtcIso`, `ratesRepository`
-│   │                                # (ping, insertBatch, logSync, findPaginated, findLatestByCurrency, findTodayWithFallback)
+│   │                                # `currencyHistoryQuerySchema`, `syncQuerySchema`, `usdtByAmountQuerySchema`
+│   ├── db/rates.repository.ts       # `getCaracasStartOfDayUtcIso`, `resolveUsdtRateForVesAmount`, `ratesRepository`
+│   │                                # (ping, insertBatch, logSync, findPaginated, findLatestByCurrency, findTodayWithFallback,
+│   │                                # upsertUsdtP2pTiers, findUsdtP2pTiers)
 │   ├── middleware/
 │   │   ├── security-headers.ts      # `securityHeadersMiddleware` (nosniff, DENY, CSP none, HSTS)
 │   │   ├── cors.ts                  # `corsMiddleware` (allowlist en `ALLOWED_ORIGINS`)
@@ -57,7 +61,7 @@ observability: "Workers logs enabled (head_sampling_rate: 1, invocation_logs: tr
 │   │   └── auth.ts                  # `authMiddleware` (SHA-256 + timingSafeEqual sobre `API_SECRET_KEYS`)
 │   ├── routes/
 │   │   ├── health.ts                # `healthRoutes` -> GET /health (SELECT 1 en D1)
-│   │   ├── rates.ts                 # `ratesRoutes`  -> GET /, /today, /:currency, /:currency/all
+│   │   ├── rates.ts                 # `ratesRoutes`  -> GET /, /today, /usdt/tiers, /usdt/by-amount, /:currency, /:currency/all
 │   │   ├── sync.ts                  # `syncRoutes`   -> POST / (?source o JSON body: all|bcv|yadio)
 │   └── services/
 │       ├── bcv.service.ts           # `fetchBcvRates`, `BcvScrapeError` (HTMLRewriter + fallback regex/depth)
@@ -92,7 +96,9 @@ Request
   └─► 5. Router Hono
         ├── GET  /health                (público; `SELECT 1 AS ok` -> 200 o 503)
         ├── GET  /api/rates             (query Zod: `page=1`, `limit=10..100`, `days=1..365`, `currency?`)
-        ├── GET  /api/rates/today       (hoy Caracas UTC-4; fallback a último histórico con `isFallback: true`)
+        ├── GET  /api/rates/today       (hoy Caracas UTC-4 + fallback `isFallback: true` + `usdt_p2p_tiers` opcional)
+        ├── GET  /api/rates/usdt/tiers  (curva de 7 tramos Binance P2P desde D1, fallback a último `YD_USD` o 404)
+        ├── GET  /api/rates/usdt/by-amount (query `?ves=<number>` resuelto server-side sobre `usdt_p2p_tiers`)
         ├── GET  /api/rates/:currency   (último registro o 404)
         ├── GET  /api/rates/:currency/all (histórico paginado por moneda)
         └── POST /api/sync              (query o JSON body Zod: `source=all|bcv|yadio`; 200 o 502 si falla upstream)
@@ -112,6 +118,9 @@ Request
   - `id` (`INTEGER PK AUTOINCREMENT`), `rate` (`REAL > 0`), `buy_rate` (`REAL NULL > 0`), `sell_rate` (`REAL NULL > 0`), `currency` (`'BCV_USD' | 'BCV_EUR' | 'YD_USD'`), `name` (`TEXT`), `source` (`'BCV' | 'YADIO'`), `created_at` (`TEXT`, UTC ISO-8601).
   - `buy_rate` y `sell_rate` son `NULL` para `BCV_USD`/`BCV_EUR` (o en `YD_USD` si falla el endpoint P2P) y almacenan la mediana Binance P2P VES para `YD_USD`.
   - Índice: `idx_rates_currency_created_at (currency, created_at DESC)`.
+- **`usdt_p2p_tiers`** (`0003_add_usdt_p2p_tiers.sql`):
+  - `tier_key` (`TEXT PK`: `'tier_5' | 'tier_15' | 'tier_35' | 'tier_75' | 'tier_150' | 'tier_400' | 'unfiltered'`), `label`, `bucket` (`'small' | 'medium' | 'large' | 'unfiltered'`), `sort_order`, `ref_usdt` (`NULL` para `unfiltered`), `amount_ves` (`NULL` para `unfiltered`), `buy_rate`, `sell_rate`, `avg_rate`, `sample_count_buy`, `sample_count_sell`, `is_fallback` (`0 | 1`), `base_rate`, `updated_at`.
+  - Mantiene siempre las 7 filas vigentes mediante `INSERT ... ON CONFLICT(tier_key) DO UPDATE` en `db.batch`.
 - **`sync_logs`**:
   - `id` (`INTEGER PK AUTOINCREMENT`), `source` (`'BCV' | 'YADIO' | 'ALL'`), `status` (`'SUCCESS' | 'ERROR'`), `message` (`TEXT`), `duration_ms` (`INTEGER`), `created_at` (`TEXT`, UTC ISO-8601).
   - Índice: `idx_sync_logs_created_at (created_at DESC)`.
@@ -124,10 +133,10 @@ Request
   - Normalización (`parseSanitizedRate` / `normalizeValidatedRate`): elimina espacios; si contiene `,`, elimina `.` (miles) y convierte `,` a `.` (`1.010,56078251` -> `1010.56`); redondea a 2 decimales.
   - Sanidad: regex `/^\d+(\.\d+)?$/` y rango estricto `1 < rate < 100_000`. Lanza `BcvScrapeError` solo si fallan tanto el origen BCV como el respaldo.
 - **Yadio (`src/services/yadio.service.ts`):**
-  - Ejecuta en paralelo el fetch principal (`/rate/ves/usd`, timeout `8_000ms`, soporta `{ rate }` o `{ data: { rate } }`) junto a `/market/ads?asset=USDT&currency=VES&side={buy|sell}&limit=50` (timeout `6_000ms`).
+  - Ejecuta en paralelo el fetch principal (`/rate/ves/usd`, timeout `8_000ms`, soporta `{ rate }` o `{ data: { rate } }`) junto a `/market/ads?asset=USDT&currency=VES&side={buy|sell}&limit=150` (timeout `6_000ms`), manteniendo un total de 3 subrequests por ejecución.
   - El fetch principal realiza 1 reintento automático tras `250ms` únicamente en errores de red/timeout o HTTP `>= 500`. NO reintenta `4xx`, JSON inválido ni fallos de sanidad (`!Number.isFinite(rate) || rate <= 1`).
-  - Para compra (`side=buy`) y venta (`side=sell`), filtra exclusivamente anuncios de Binance P2P (`binance_native_v1 != null` o `ad_url` contiene `binance`) y calcula la mediana redondeada a 2 decimales (`buy_rate`, `sell_rate`).
-  - Degradación controlada: si falla `/market/ads` o no hay anuncios de Binance, retorna `buy_rate: null` / `sell_rate: null` sin abortar la sincronización de `rate`. Lanza `YadioServiceError` solo si falla la tasa principal.
+  - Para compra (`side=buy`) y venta (`side=sell`), filtra anuncios de Binance P2P (`binance_native_v1 != null` o `ad_url` contiene `binance`) descartando outliers (`> 40%` de desviación respecto a `baseRate`) y calcula la mediana `unfiltered` más la curva de tramos `USDT_P2P_TIERS` filtrando en memoria por `[minVes, maxVes]` (`extractAdVesLimits`, usando `dynamic_max_amount` prioritario sobre `max_amount`) sobre el top 20 más competitivo de cada tramo, con fallback escalonado al tramo superior siguiente si un tramo no tiene muestra.
+  - Degradación controlada: si falla `/market/ads` o no hay anuncios de Binance, retorna `buy_rate: null` / `sell_rate: null` y `p2pTiers: []` sin abortar la sincronización de `rate` ni sobrescribir tramos previos en D1. Lanza `YadioServiceError` solo si falla la tasa principal.
 - **Orquestador (`src/services/sync.service.ts`):**
   - Ejecuta fuentes solicitadas, persiste vía `ratesRepository.insertBatch` (`db.batch`), y registra `SUCCESS` o `ERROR` en `sync_logs` con `duration_ms`.
 

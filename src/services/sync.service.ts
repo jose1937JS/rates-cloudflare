@@ -1,5 +1,11 @@
 import { ratesRepository } from '../db/rates.repository';
-import type { Env, NewRateRecord, SyncLogSource, SyncSource } from '../types/env';
+import type {
+  Env,
+  NewRateRecord,
+  NewUsdtP2PTierRecord,
+  SyncLogSource,
+  SyncSource,
+} from '../types/env';
 import { fetchBcvRates } from './bcv.service';
 import { fetchYadioRate } from './yadio.service';
 
@@ -8,6 +14,7 @@ export interface SyncResult {
   syncedCount: number;
   rates: NewRateRecord[];
   durationMs: number;
+  p2pTiersCount?: number;
 }
 
 function toLogSource(source: SyncSource): SyncLogSource {
@@ -22,6 +29,8 @@ export const syncService = {
     try {
       const rates: NewRateRecord[] = [];
       const errors: string[] = [];
+      let p2pTiers: NewUsdtP2PTierRecord[] = [];
+      let tiersWarning: string | null = null;
 
       const [bcvResult, yadioResult] = await Promise.all([
         source === 'bcv' || source === 'all'
@@ -54,7 +63,9 @@ export const syncService = {
 
       if (yadioResult) {
         if (yadioResult.ok) {
-          rates.push(yadioResult.value);
+          const { p2pTiers: fetchedTiers, ...yadioRecord } = yadioResult.value;
+          rates.push(yadioRecord);
+          p2pTiers = fetchedTiers;
         } else {
           errors.push(yadioResult.error);
         }
@@ -62,6 +73,16 @@ export const syncService = {
 
       if (rates.length > 0) {
         await ratesRepository.insertBatch(env.DB, rates);
+      }
+
+      let persistedTiersCount = 0;
+      if (p2pTiers.length > 0) {
+        try {
+          await ratesRepository.upsertUsdtP2pTiers(env.DB, p2pTiers);
+          persistedTiersCount = p2pTiers.length;
+        } catch (tierError) {
+          tiersWarning = tierError instanceof Error ? tierError.message : String(tierError);
+        }
       }
 
       if (errors.length > 0) {
@@ -76,11 +97,17 @@ export const syncService = {
         )
         .join(', ');
 
+      const tiersNote = tiersWarning
+        ? ` | P2P tiers skipped: ${tiersWarning}`
+        : persistedTiersCount > 0
+          ? ` (${persistedTiersCount} P2P tiers)`
+          : '';
+
       const durationMs = Date.now() - start;
       await ratesRepository.logSync(env.DB, {
         source: logSource,
         status: 'SUCCESS',
-        message: `Synced ${rates.length} rate(s): ${summary}`,
+        message: `Synced ${rates.length} rate(s): ${summary}${tiersNote}`,
         duration_ms: durationMs,
       });
 
@@ -89,6 +116,7 @@ export const syncService = {
         syncedCount: rates.length,
         rates,
         durationMs,
+        ...(persistedTiersCount > 0 ? { p2pTiersCount: persistedTiersCount } : {}),
       };
     } catch (error) {
       const durationMs = Date.now() - start;

@@ -22,3 +22,7 @@ export const currencyHistoryQuerySchema = z.object({
 export const syncQuerySchema = z.object({
   source: z.enum(['all', 'bcv', 'yadio']).default('all'),
 });
+
+export const usdtByAmountQuerySchema = z.object({
+  ves: z.coerce.number().finite().positive().max(1_000_000_000),
+});
